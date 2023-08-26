@@ -3,10 +3,12 @@
 #include <random>
 #include <unordered_set>
 #include <stdint.h>
+#include <queue>
 
 #define DETERMINISTIC() true
 
 typedef uint32_t uint32;
+typedef uint64_t uint64;
 
 std::mt19937 GetRNG()
 {
@@ -20,95 +22,137 @@ std::mt19937 GetRNG()
 	#endif
 }
 
-// Gauss in the Haus
-// https://nrich.maths.org/2478
-int SumIntegersOneToN(int N)
+inline uint64 NodesToConnectionIndex(uint32 nodeA, uint32 nodeB)
 {
-	return (N * (N + 1)) / 2;
+	if (nodeA > nodeB)
+		std::swap(nodeA, nodeB);
+
+	return uint64(nodeA) << 32 | uint64(nodeB);
 }
 
-// F^(-1)(x)
-int Inverse_SumIntegersOneToN(int N)
+bool AcceptCycle(std::unordered_set<uint64>& existingConnections, const std::vector<uint32>& nodeVisitOrder)
 {
-	return (int)std::floor(0.5f + std::sqrt(2.0f * float(N) + 0.25f));
-}
-
-uint32 NumBits(uint32 x)
-{
-	uint32 ret = 0;
-	while (x)
+	// If any of the connections already exist, don't accept this cycle
+	for (size_t index = 0; index < nodeVisitOrder.size(); ++index)
 	{
-		x /= 2;
-		ret++;
+		uint32 nodeA = nodeVisitOrder[index];
+		uint32 nodeB = nodeVisitOrder[(index + 1) % nodeVisitOrder.size()];
+
+		uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
+
+		if (existingConnections.count(connection) > 0)
+			return false;
 	}
-	return ret;
+
+	// Else, accept the cycle
+	for (size_t index = 0; index < nodeVisitOrder.size(); ++index)
+	{
+		uint32 nodeA = nodeVisitOrder[index];
+		uint32 nodeB = nodeVisitOrder[(index + 1) % nodeVisitOrder.size()];
+
+		uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
+
+		existingConnections.insert(connection);
+	}
+
+	return true;
+}
+
+// Not the most efficient way to find the shortest distance from nodeA to nodeB
+// It's brute force without any heuristic but also doesn't keep track of what paths it has already tried!
+uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std::unordered_set<uint64>& connectionsMade)
+{
+	struct PathEntry
+	{
+		uint32 lastNode;
+		uint32 distance;
+	};
+
+	auto cmp = [](const PathEntry& A, const PathEntry& B) { return A.distance > B.distance; };
+	std::priority_queue<PathEntry, std::vector<PathEntry>, decltype(cmp)> paths(cmp);
+
+	paths.push({ nodeA, 0 });
+
+	while (paths.size() > 0)
+	{
+		// Get the shortest path and remove it from the list
+		PathEntry bestPath = paths.top();
+		paths.pop();
+
+		// If this node connects to nodeB, we are done!
+		uint64 connection = NodesToConnectionIndex(bestPath.lastNode, nodeB);
+		if (connectionsMade.count(connection) > 0)
+			return bestPath.distance + 1;
+
+		// Otherwise, add all the connections from this node to check
+		for (uint32 i = 0; i < numNodes; ++i)
+		{
+			uint64 connection = NodesToConnectionIndex(bestPath.lastNode, i);
+			if (connectionsMade.count(connection) > 0)
+				paths.push({ i, bestPath.distance + 1 });
+		}
+	}
+
+	// This shouldn't ever happen.
+	// This means there isn't a connection from nodeA to nodeB, but after
+	// the first iteration, the graph should be connected.
+	return ~uint32(0);
+}
+
+uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connectionsMade)
+{
+	uint32 radius = 0;
+	for (uint32 nodeA = 0; nodeA < numNodes; ++nodeA)
+	{
+		for (uint32 nodeB = nodeA + 1; nodeB < numNodes; ++nodeB)
+		{
+			uint32 distance = CalculateDistance(nodeA, nodeB, numNodes, connectionsMade);
+			radius = std::max(radius, distance);
+		}
+	}
+	return radius;
 }
 
 void DoGraphTest(uint32 numNodes, uint32 numIterations)
 {
-	const uint32 c_numNodesBits = NumBits(numNodes);
-	const uint32 c_numNodesMask = (1 << c_numNodesBits) - 1;
+	printf("%u nodes\n", numNodes);
 
 	std::mt19937 rng = GetRNG();
 
-	std::uniform_int_distribution<uint32> nodeDist1(0, numNodes);
-	std::uniform_int_distribution<uint32> nodeDist2(0, numNodes - 1);
+	// The list of nodes we'll shuffle each iteration to get a new cycle.
+	std::vector<uint32> nodeVisitOrder(numNodes);
+	for (uint32 index = 0; index < numNodes; ++index)
+		nodeVisitOrder[index] = index;
 
-	// TODO: run for a number of iterations (voting rounds?) or until diamater reaches a limit, or until a number of total votes is reached?
-	std::unordered_set<uint32> connectionsMade;
-	std::vector<uint32> connectionsList;
-	std::vector<size_t> connectionsListCounts; // a count at each iteration
-	std::vector<double> adjacencyMatrix(numNodes * numNodes, 0.0);
+	// The list of connections already made.
+	// Used to check if a cycle is valid, only using connections not yet made
+	std::unordered_set<uint64> connectionsMade;
 
-	uint32 iteration = 0;
-	while (iteration < numIterations)
+	// Iterate!
+	for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 	{
-		// TODO: calculate eigenvalues of adjacency matrix. 1st eigenvalue is d. do d/2 pair selections
-		// TODO: what is d for the first round?
-		int d = numNodes / 2;
+		// TODO: give up after a number of loops for random generation below?
+		// can we calculate how long until it's impossible?
 
-		for (int newLinkIndex = 0; newLinkIndex < d; ++newLinkIndex)
+		// Generate a random cycle which doesn't use any connections that already exist
+		do
 		{
-			// Generate a new pair of nodes to link to
-			// A node can't link to itself
-			// A link can be made only once
-			uint32 nextLink, nextLinkA, nextLinkB;
-			do
-			{
-				// Generate 2 random, unique node indices
-				nextLinkA = nodeDist1(rng);
-				nextLinkB = nodeDist2(rng);
-				if (nextLinkB >= nextLinkA)
-					nextLinkB++;
-
-				// Properly order the links and make the total link record
-				if (nextLinkA > nextLinkB)
-					std::swap(nextLinkA, nextLinkB);
-				nextLink = (nextLinkA << c_numNodesBits) | nextLinkB;
-			}
-			while(nextLinkA == nextLinkB || connectionsMade.count(nextLink) > 0);
-
-			// Record this new link
-			connectionsMade.insert(nextLink);
-			connectionsList.push_back(nextLink);
-			adjacencyMatrix[nextLinkA * numNodes + nextLinkB] = 1.0f;
-			adjacencyMatrix[nextLinkB * numNodes + nextLinkA] = 1.0f;
+			std::shuffle(nodeVisitOrder.begin(), nodeVisitOrder.end(), rng);
 		}
+		while(!AcceptCycle(connectionsMade, nodeVisitOrder));
 
-		// remember the size of the list after this iteration, so we can separate the iteration lists later
-		connectionsListCounts.push_back(connectionsList.size());
+		// The shortest path between two nodes is a distance between the nodes.
+		// Considering all node pairs, the longest distance is the radius
+		uint32 radius = CalculateRadius(numNodes, connectionsMade);
 
-		// TODO: score the graph. is it by diameter? or that other metric??
-
-		iteration++;
+		// TODO: store in a table, calculate mean and std dev.
+		printf("    [%u] radius %u\n", iteration, radius);
 	}
-
-	// TODO: write ordered list of links to disk
 }
 
 int main(int argc, char** argv)
 {
-	DoGraphTest(10, 1);
+	DoGraphTest(40, 5);
 	return 0;
 }
 
@@ -117,6 +161,23 @@ int main(int argc, char** argv)
 
 /*
 TODO:
-* need eigen library to calculate eigenvectors of connection matrix!
-* also need FPE code from other blog post, to do that stuff.
+* profile. the first seems to take the longest. how come?
+* For N nodes:
+ - generate a random cycle, calculate radius
+ - do this M times
+ - do the whole test O times
+ - show avg and stddev at each number of cycles.
+ - do this for several values of N and make a graph.
+ - make sure a cycle doesn't use a path taken previously.
+ - also need to implement page rank, and can check accuracy. could give a random score to each node that determines the voting, and is the ground truth in page rank
+*/
+
+/*
+Notes:
+* the video is great, and explains the motivation for the algorithm.
+* the algorithm itself is real simple and you don't need eigenvalues or adjacency graphs at runtime.
+* just visit every node in a random order, making sure no path has been taken before.
+* each of these cycles (hamiltonian?) decreases the radius.
+* could use FPE instead of actually shuffling the list.
+* link to the actual implementation, there are other practical things considered, like people who don't use their vote.
 */
