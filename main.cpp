@@ -40,6 +40,12 @@ inline void ConnectionIndexToNodes(uint64 connectionIndex, uint32& nodeA, uint32
 	nodeB = (uint32)connectionIndex;
 }
 
+float CalculateScore()
+{
+	// TODO: use page rank to come up with a final list
+	return 0.0f;
+}
+
 bool AcceptCycle(std::unordered_set<uint64>& existingConnections, const std::vector<uint32>& nodeVisitOrder)
 {
 	// If any of the connections already exist, don't accept this cycle
@@ -142,12 +148,16 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 	static const int c_colVotesStddev = 1;
 	static const int c_colRadius = 2;
 	static const int c_colRadiusStddev = 3;
+	static const int c_colScore = 4;
+	static const int c_colScoreStddev = 5;
 
 	CSV csv;
 	csv.SetColumnLabel(c_colVotes, "votes");
 	csv.SetColumnLabel(c_colVotesStddev, "votes stddev");
 	csv.SetColumnLabel(c_colRadius, "radius");
 	csv.SetColumnLabel(c_colRadiusStddev, "radius stddev");
+	csv.SetColumnLabel(c_colScore, "score");
+	csv.SetColumnLabel(c_colScoreStddev, "score stddev");
 
 	std::mt19937 rng = GetRNG();
 
@@ -173,6 +183,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		// Iterate!
 		std::vector<std::vector<uint64>> connectionsList(numIterations);
 		std::vector<uint32> radiusList(numIterations, ~uint32(0));
+		std::vector<float> scoreList(numIterations, 0.0f);
 		for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 		{
 			// Generate a random cycle which doesn't use any connections that already exist
@@ -207,9 +218,13 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			// The shortest path between two nodes is a distance between the nodes.
 			// Considering all node pairs, the longest distance is the radius
 			uint32 radius = CalculateRadius(numNodes, connectionsMade);
+			float score = CalculateScore();
 
 			if (testIndex == 0)
+			{
 				radiusList[iteration] = radius;
+				scoreList[iteration] = score;
+			}
 
 			// Store the data in the csv
 			float votes = (float)((iteration + 1) * numNodes);
@@ -218,6 +233,9 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 
 			csv.SetDataRunningAverage(c_colRadius, iteration, (float)radius, testIndex);
 			csv.SetDataRunningAverage(c_colRadiusStddev, iteration, (float)radius * radius, testIndex);
+
+			csv.SetDataRunningAverage(c_colScore, iteration, score, testIndex);
+			csv.SetDataRunningAverage(c_colScoreStddev, iteration, score * score, testIndex);
 		}
 
 		// Write out the details for the first test
@@ -231,7 +249,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			{
 				for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 				{
-					fprintf(file, "Iteration %u, radius %u\n", iteration, radiusList[iteration]);
+					fprintf(file, "Iteration %u, radius %u, score %f\n", iteration, radiusList[iteration], scoreList[iteration]);
 					for (uint64 connection : connectionsList[iteration])
 					{
 						uint32 nodeA, nodeB;
@@ -239,10 +257,6 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 						fprintf(file, "%i,%i\n", nodeA, nodeB);
 					}
 				}
-
-				// TODO: also should show accuracy stats
-				// TODO: should be tracking accuracy stats for each as well!
-
 				fclose(file);
 			}
 		}
@@ -266,6 +280,16 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		float variance = std::max(avgSquared - avg * avg, 0.0f);
 		float stdDev = std::sqrt(variance);
 		csv.columns[c_colRadiusStddev].data[index] = stdDev;
+	}
+
+	// Calculate stddev of score
+	for (size_t index = 0; index < csv.columns[c_colScoreStddev].data.size(); ++index)
+	{
+		float avg = csv.columns[c_colScore].data[index];
+		float avgSquared = csv.columns[c_colScoreStddev].data[index];
+		float variance = std::max(avgSquared - avg * avg, 0.0f);
+		float stdDev = std::sqrt(variance);
+		csv.columns[c_colScoreStddev].data[index] = stdDev;
 	}
 
 	// save the data
