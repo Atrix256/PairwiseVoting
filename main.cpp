@@ -4,11 +4,118 @@
 #include <unordered_set>
 #include <stdint.h>
 #include <queue>
+#include <direct.h>
+#include <stdarg.h>
 
 #define DETERMINISTIC() true
 
 typedef uint32_t uint32;
 typedef uint64_t uint64;
+
+float Lerp(float A, float B, float t)
+{
+	return A * (1.0f - t) + B * t;
+}
+
+struct CSV
+{
+	struct Column
+	{
+		std::string			label;
+		std::vector<float>	data;
+	};
+
+	std::vector<Column> columns;
+
+	void SetColumnLabel(uint32 column, const char* label)
+	{
+		if (columns.size() <= column)
+			columns.resize(column + 1);
+		columns[column].label = label;
+	}
+
+	void SetData(uint32 column, uint32 row, float data)
+	{
+		if (columns.size() <= column)
+			columns.resize(column + 1);
+		if (columns[column].data.size() <= row)
+			columns[column].data.resize(row + 1);
+		columns[column].data[row] = data;
+	}
+
+	float GetData(uint32 column, uint32 row) const
+	{
+		if (columns.size() <= column)
+			return 0.0f;
+		if (columns[column].data.size() <= row)
+			return 0.0f;
+		return columns[column].data[row];
+	}
+
+	void SetDataRunningAverage(uint32 column, uint32 row, float newData, uint32 sampleIndex)
+	{
+		float data = GetData(column, row);
+		data = Lerp(data, newData, 1.0f / float(sampleIndex + 1));
+		SetData(column, row, data);
+	}
+
+	bool Save(const char* fileNameFormat, ...) const
+	{
+		// make filename
+		char fileName[1024];
+		va_list args;
+		va_start(args, fileNameFormat);
+		vsprintf_s(fileName, fileNameFormat, args);
+		va_end(args);
+
+		// open file
+		FILE* file;
+		fopen_s(&file, fileName, "wb");
+		if (!file)
+			return false;
+
+		// header row
+		fprintf(file, "row");
+		for (uint32 column = 0; column < columns.size(); ++column)
+			fprintf(file, ",\"%s\"", columns[column].label.c_str());
+		fprintf(file, "\n");
+
+		// data rows
+		uint32 row = 0;
+		bool moreRows = true;
+		while (moreRows)
+		{
+			moreRows = false;
+			for (uint32 column = 0; column < columns.size(); ++column)
+			{
+				const Column& col = columns[column];
+				if (row < col.data.size())
+				{
+					moreRows = true;
+					break;
+				}
+			}
+			if (!moreRows)
+				break;
+
+			fprintf(file, "\"%u\"", row);
+			for (uint32 column = 0; column < columns.size(); ++column)
+			{
+				const Column& col = columns[column];
+				if (row < col.data.size())
+					fprintf(file, ",\"%f\"", col.data[row]);
+				else
+					fprintf(file, ",\"%f\"", 0.0f);
+			}
+			fprintf(file, "\n");
+			row++;
+		}
+
+		// close file
+		fclose(file);
+		return true;
+	}
+};
 
 std::mt19937 GetRNG()
 {
@@ -28,6 +135,12 @@ inline uint64 NodesToConnectionIndex(uint32 nodeA, uint32 nodeB)
 		std::swap(nodeA, nodeB);
 
 	return uint64(nodeA) << 32 | uint64(nodeB);
+}
+
+inline void ConnectionIndexToNodes(uint64 connectionIndex, uint32& nodeA, uint32& nodeB)
+{
+	nodeA = connectionIndex >> 32;
+	nodeB = (uint32)connectionIndex;
 }
 
 bool AcceptCycle(std::unordered_set<uint64>& existingConnections, const std::vector<uint32>& nodeVisitOrder)
@@ -58,8 +171,8 @@ bool AcceptCycle(std::unordered_set<uint64>& existingConnections, const std::vec
 	return true;
 }
 
-// Not the most efficient way to find the shortest distance from nodeA to nodeB
-// It's brute force without any heuristic but also doesn't keep track of what paths it has already tried!
+// Search through the graph to find the shortest path from nodeA to nodeB, using the connections stored in connectionsMade.
+// It uses a set to make sure no paths visit nodes already accounted for by other paths.
 uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std::unordered_set<uint64>& connectionsMade)
 {
 	struct PathEntry
@@ -71,6 +184,8 @@ uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std:
 	auto cmp = [](const PathEntry& A, const PathEntry& B) { return A.distance > B.distance; };
 	std::priority_queue<PathEntry, std::vector<PathEntry>, decltype(cmp)> paths(cmp);
 
+	std::unordered_set<uint32> nodesAlreadyVisited;
+
 	paths.push({ nodeA, 0 });
 
 	while (paths.size() > 0)
@@ -78,6 +193,9 @@ uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std:
 		// Get the shortest path and remove it from the list
 		PathEntry bestPath = paths.top();
 		paths.pop();
+
+		// remember that we've already visited this lastNode so we don't do it again and back track
+		nodesAlreadyVisited.insert(bestPath.lastNode);
 
 		// If this node connects to nodeB, we are done!
 		uint64 connection = NodesToConnectionIndex(bestPath.lastNode, nodeB);
@@ -87,6 +205,10 @@ uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std:
 		// Otherwise, add all the connections from this node to check
 		for (uint32 i = 0; i < numNodes; ++i)
 		{
+			// only consider going to a node if we haven't already visited it
+			if (nodesAlreadyVisited.count(i) > 0)
+				continue;
+
 			uint64 connection = NodesToConnectionIndex(bestPath.lastNode, i);
 			if (connectionsMade.count(connection) > 0)
 				paths.push({ i, bestPath.distance + 1 });
@@ -96,11 +218,13 @@ uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std:
 	// This shouldn't ever happen.
 	// This means there isn't a connection from nodeA to nodeB, but after
 	// the first iteration, the graph should be connected.
+	printf("ERROR: CalculateDistance() couldn't find a path!\n");
 	return ~uint32(0);
 }
 
 uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connectionsMade)
 {
+	// Note: this loop could be parallelized across threads
 	uint32 radius = 0;
 	for (uint32 nodeA = 0; nodeA < numNodes; ++nodeA)
 	{
@@ -113,46 +237,150 @@ uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connec
 	return radius;
 }
 
-void DoGraphTest(uint32 numNodes, uint32 numIterations)
+void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase)
 {
-	printf("%u nodes\n", numNodes);
+	printf("%s\n", fileNameBase);
+
+	static const int c_colVotes = 0;
+	static const int c_colVotesStddev = 1;
+	static const int c_colRadius = 2;
+	static const int c_colRadiusStddev = 3;
+
+	CSV csv;
+	csv.SetColumnLabel(c_colVotes, "votes");
+	csv.SetColumnLabel(c_colVotesStddev, "votes stddev");
+	csv.SetColumnLabel(c_colRadius, "radius");
+	csv.SetColumnLabel(c_colRadiusStddev, "radius stddev");
 
 	std::mt19937 rng = GetRNG();
 
-	// The list of nodes we'll shuffle each iteration to get a new cycle.
-	std::vector<uint32> nodeVisitOrder(numNodes);
-	for (uint32 index = 0; index < numNodes; ++index)
-		nodeVisitOrder[index] = index;
-
-	// The list of connections already made.
-	// Used to check if a cycle is valid, only using connections not yet made
-	std::unordered_set<uint64> connectionsMade;
-
-	// Iterate!
-	for (uint32 iteration = 0; iteration < numIterations; ++iteration)
+	int lastPercent = -1;
+	for (uint32 testIndex = 0; testIndex < numTests; ++testIndex)
 	{
-		// TODO: give up after a number of loops for random generation below?
-		// can we calculate how long until it's impossible?
-
-		// Generate a random cycle which doesn't use any connections that already exist
-		do
+		int percent = int(100.0f * (float(testIndex) / float(numTests - 1)));
+		if (lastPercent != percent)
 		{
-			std::shuffle(nodeVisitOrder.begin(), nodeVisitOrder.end(), rng);
+			printf("\r%i%%", percent);
+			lastPercent = percent;
 		}
-		while(!AcceptCycle(connectionsMade, nodeVisitOrder));
 
-		// The shortest path between two nodes is a distance between the nodes.
-		// Considering all node pairs, the longest distance is the radius
-		uint32 radius = CalculateRadius(numNodes, connectionsMade);
+		// The list of nodes we'll shuffle each iteration to get a new cycle.
+		std::vector<uint32> nodeVisitOrder(numNodes);
+		for (uint32 index = 0; index < numNodes; ++index)
+			nodeVisitOrder[index] = index;
 
-		// TODO: store in a table, calculate mean and std dev.
-		printf("    [%u] radius %u\n", iteration, radius);
+		// The list of connections already made.
+		// Used to check if a cycle is valid, only using connections not yet made
+		std::unordered_set<uint64> connectionsMade;
+
+		// Iterate!
+		std::vector<std::vector<uint64>> connectionsList(numIterations);
+		std::vector<uint32> radiusList(numIterations, ~uint32(0));
+		for (uint32 iteration = 0; iteration < numIterations; ++iteration)
+		{
+			// Generate a random cycle which doesn't use any connections that already exist
+			uint32 attempts = 0;
+			do
+			{
+				std::shuffle(nodeVisitOrder.begin(), nodeVisitOrder.end(), rng);
+				attempts++;
+			} while (!AcceptCycle(connectionsMade, nodeVisitOrder) && attempts < 100000);
+			if (attempts == 100000)
+			{
+				printf("ERROR: Couldn't find a valid random cycle at iteration %u. Stopping early.\n", iteration);
+				break;
+			}
+
+			// In the first test, save off each round of connections, to save out to a text file
+			if (testIndex == 0)
+			{
+				connectionsList[iteration].resize(numNodes);
+				for (size_t index = 0; index < numNodes; ++index)
+				{
+					uint32 nodeA = nodeVisitOrder[index];
+					uint32 nodeB = nodeVisitOrder[(index + 1) % nodeVisitOrder.size()];
+
+					uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
+
+					connectionsList[iteration][index] = connection;
+				}
+				std::sort(connectionsList[iteration].begin(), connectionsList[iteration].end());
+			}
+
+			// The shortest path between two nodes is a distance between the nodes.
+			// Considering all node pairs, the longest distance is the radius
+			uint32 radius = CalculateRadius(numNodes, connectionsMade);
+
+			if (testIndex == 0)
+				radiusList[iteration] = radius;
+
+			// Store the data in the csv
+			float votes = (float)((iteration + 1) * numNodes);
+			csv.SetDataRunningAverage(c_colVotes, iteration, votes, testIndex);
+			csv.SetDataRunningAverage(c_colVotesStddev, iteration, votes*votes, testIndex);
+
+			csv.SetDataRunningAverage(c_colRadius, iteration, (float)radius, testIndex);
+			csv.SetDataRunningAverage(c_colRadiusStddev, iteration, (float)radius * radius, testIndex);
+		}
+
+		// Write out the details for the first test
+		if (testIndex == 0)
+		{
+			char fileName[1024];
+			sprintf_s(fileName, "%s.example.txt", fileNameBase);
+			FILE* file;
+			fopen_s(&file, fileName, "wb");
+			if (file)
+			{
+				for (uint32 iteration = 0; iteration < numIterations; ++iteration)
+				{
+					fprintf(file, "Iteration %u, radius %u\n", iteration, radiusList[iteration]);
+					for (uint64 connection : connectionsList[iteration])
+					{
+						uint32 nodeA, nodeB;
+						ConnectionIndexToNodes(connection, nodeA, nodeB);
+						fprintf(file, "%i,%i\n", nodeA, nodeB);
+					}
+				}
+
+				// TODO: also should show accuracy stats
+				// TODO: should be tracking accuracy stats for each as well!
+
+				fclose(file);
+			}
+		}
 	}
+
+	// Calculate stddev of votes
+	for (size_t index = 0; index < csv.columns[c_colVotesStddev].data.size(); ++index)
+	{
+		float avg = csv.columns[c_colVotes].data[index];
+		float avgSquared = csv.columns[c_colVotesStddev].data[index];
+		float variance = std::max(avgSquared - avg * avg, 0.0f);
+		float stdDev = std::sqrt(variance);
+		csv.columns[c_colVotesStddev].data[index] = stdDev;
+	}
+
+	// Calculate stddev of radius
+	for (size_t index = 0; index < csv.columns[c_colRadiusStddev].data.size(); ++index)
+	{
+		float avg = csv.columns[c_colRadius].data[index];
+		float avgSquared = csv.columns[c_colRadiusStddev].data[index];
+		float variance = std::max(avgSquared - avg * avg, 0.0f);
+		float stdDev = std::sqrt(variance);
+		csv.columns[c_colRadiusStddev].data[index] = stdDev;
+	}
+
+	// save the data
+	csv.Save("%s.csv", fileNameBase);
+	printf("\r100%%\n");
 }
 
 int main(int argc, char** argv)
 {
-	DoGraphTest(40, 5);
+	_mkdir("out");
+	DoGraphTest(10, 3, 100, "out/10");
+	DoGraphTest(60, 5, 100, "out/60");
 	return 0;
 }
 
@@ -161,15 +389,11 @@ int main(int argc, char** argv)
 
 /*
 TODO:
-* profile. the first seems to take the longest. how come?
-* For N nodes:
- - generate a random cycle, calculate radius
- - do this M times
- - do the whole test O times
- - show avg and stddev at each number of cycles.
- - do this for several values of N and make a graph.
- - make sure a cycle doesn't use a path taken previously.
- - also need to implement page rank, and can check accuracy. could give a random score to each node that determines the voting, and is the ground truth in page rank
+- also need to implement page rank, and can check accuracy. could give a random score to each node that determines the voting, and is the ground truth in page rank
+ * the score could also just be the node index. maybe make a node "actual score" function and return node index, but comment that it could be a random score or anything else.
+ * also, comparing the page rank winner list vs the actual winner list. maybe sum of abs distance of everyone from their true location? kind of like an optimal transport
+ 
+! the deterministic FPE based ones
 */
 
 /*
