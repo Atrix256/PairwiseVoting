@@ -40,8 +40,31 @@ inline void ConnectionIndexToNodes(uint64 connectionIndex, uint32& nodeA, uint32
 	nodeB = (uint32)connectionIndex;
 }
 
-float CalculateScore()
+float CalculateScore(uint32 numNodes, const std::unordered_set<uint64>& connections)
 {
+	// We need a node score to determine which node would win in a match or a vote.
+	// We will just use the node index cause it doesn't really matter.
+	auto NodeScore = [](uint32 node) { return (float)node; };
+
+	// make the list of nodes
+	struct Node
+	{
+		std::vector<uint32> linksOut;
+		float value = 1.0f;
+	};
+	std::vector<Node> nodes(numNodes);
+	for (uint64 connection : connections)
+	{
+		uint32 nodeA, nodeB;
+		ConnectionIndexToNodes(connection, nodeA, nodeB);
+
+		// This is where the vote or tournament play happens
+		if (NodeScore(nodeA) < NodeScore(nodeB))
+			nodes[nodeA].linksOut.push_back(nodeB);
+	}
+
+	// 
+
 	// TODO: use page rank to come up with a final list
 	return 0.0f;
 }
@@ -218,7 +241,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			// The shortest path between two nodes is a distance between the nodes.
 			// Considering all node pairs, the longest distance is the radius
 			uint32 radius = CalculateRadius(numNodes, connectionsMade);
-			float score = CalculateScore();
+			float score = CalculateScore(numNodes, connectionsMade);
 
 			if (testIndex == 0)
 			{
