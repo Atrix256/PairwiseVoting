@@ -9,6 +9,10 @@
 
 #include "csv.h"
 
+static const size_t	c_pageRankMaxIterations = 100;
+static const float	c_pageRankConvergenceEpsilon = 0.001f;
+static const float	c_pageRankDamping = 0.85f;
+
 #define DETERMINISTIC() true
 
 typedef uint32_t uint32;
@@ -40,33 +44,124 @@ inline void ConnectionIndexToNodes(uint64 connectionIndex, uint32& nodeA, uint32
 	nodeB = (uint32)connectionIndex;
 }
 
-float CalculateScore(uint32 numNodes, const std::unordered_set<uint64>& connections)
+float DotProduct(const float* A, const float* B, uint32 count)
+{
+	float ret = 0.0f;
+	for (uint32 index = 0; index < count; ++index)
+		ret += A[index] * B[index];
+	return ret;
+}
+
+float Distance(const std::vector<float>& A, const std::vector<float>& B)
+{
+	float ret = 0.0f;
+	for (size_t i = 0; i < A.size(); ++i)
+	{
+		float diff = B[i] - A[i];
+		ret += diff * diff;
+	}
+	return std::sqrt(ret);
+}
+
+uint32 CalculateScoringDistance(uint32 numNodes, const std::unordered_set<uint64>& connections)
 {
 	// We need a node score to determine which node would win in a match or a vote.
 	// We will just use the node index cause it doesn't really matter.
 	auto NodeScore = [](uint32 node) { return (float)node; };
 
-	// make the list of nodes
-	struct Node
-	{
-		std::vector<uint32> linksOut;
-		float value = 1.0f;
-	};
-	std::vector<Node> nodes(numNodes);
+	// make a matrix that describes how node values flow from each node to others.
+	// Row r describes how values flow into node r from other nodes.
+	std::vector<float> M(numNodes * numNodes, 0.0f);
 	for (uint64 connection : connections)
 	{
 		uint32 nodeA, nodeB;
 		ConnectionIndexToNodes(connection, nodeA, nodeB);
 
-		// This is where the vote or tournament play happens
-		if (NodeScore(nodeA) < NodeScore(nodeB))
-			nodes[nodeA].linksOut.push_back(nodeB);
+		// This is where the vote or tournament play happens.
+		// If A wins, B flows into A, else A flows into B.
+		if (NodeScore(nodeA) > NodeScore(nodeB))
+			M[nodeA * numNodes + nodeB] = 1.0f;
+		else
+			M[nodeB * numNodes + nodeA] = 1.0f;
 	}
 
-	// 
+	// now make sure each column sums up to 1.0
+	for (uint32 column = 0; column < numNodes; ++column)
+	{
+		float sum = 0.0f;
+		for (uint32 row = 0; row < numNodes; ++row)
+			sum += M[row * numNodes + column];
+		if (sum != 0.0f)
+		{
+			for (uint32 row = 0; row < numNodes; ++row)
+				M[row * numNodes + column] /= sum;
+		}
+	}
 
-	// TODO: use page rank to come up with a final list
-	return 0.0f;
+	// Apply a 1 - c_pageRankDamping percent chance for anyone to win, despite the vote.
+	for (float& f : M)
+		f = f * c_pageRankDamping + (1.0f - c_pageRankDamping) / float(numNodes);
+
+	// put equal value in each node to start out.
+	std::vector<float> V(numNodes, 1.0f / float(numNodes));
+
+	// Now repeatedly do: V = MV.
+	// Each operation is equivelent to letting the values flow from each node to the
+	// nodes that beat them, equally.  The winners will get more score and give away less score.
+	// We'll get a steady state in the end and be able to score the nodes.
+	std::vector<float> NewV(numNodes);
+	for (size_t index = 0; index < c_pageRankMaxIterations; ++index)
+	{
+		// NewV = M * V
+		for (uint32 row = 0; row < numNodes; ++row)
+			NewV[row] = DotProduct(V.data(), &M[row*numNodes], numNodes);
+
+		// Normalize NewV to sum to 1.0 again
+		float sum = 0.0f;
+		for (float f : NewV)
+			sum += f;
+		for (float& f : NewV)
+			f /= sum;
+
+		// Exit out if we've converged enough
+		float diff = Distance(V, NewV);
+		if (diff <= c_pageRankConvergenceEpsilon)
+			break;
+
+		// NewV is the V for next iteration
+		std::swap(V, NewV);
+	}
+
+	// Make a sorted list of the nodes, from highest score to lowest
+	struct NodeInfo
+	{
+		uint32 nodeIndex;
+		float score;
+	};
+	std::vector<NodeInfo> scoreBoard(numNodes);
+	for (uint32 i = 0; i < numNodes; ++i)
+	{
+		scoreBoard[i].nodeIndex = i;
+		scoreBoard[i].score = NewV[i];
+	}
+	std::sort(scoreBoard.begin(), scoreBoard.end(), [](const NodeInfo& A, const NodeInfo& B) {return A.score > B.score; });
+
+	// Calculate the accuracy of the score.
+	// The accuracy is the sum of the abs difference between the ranking in the scoreboard,
+	// and what rank the node should be at.
+	// I believe this is equivelent to optimal transport.
+	// A node should be at (numNodes - nodeIndex - 1) in the scoreboard, since a node's score
+	// is the same as it's node index. 0 will always lose to 1, will always lose to 2, etc.
+	uint32 scoringDistance = 0;
+	for (uint32 rank = 0; rank < numNodes; ++rank)
+	{
+		uint32 actualRank = (numNodes - scoreBoard[rank].nodeIndex - 1);
+		if (rank <= actualRank)
+			scoringDistance += actualRank - rank;
+		else
+			scoringDistance += rank - actualRank;
+	}
+	return scoringDistance;
 }
 
 bool AcceptCycle(std::unordered_set<uint64>& existingConnections, const std::vector<uint32>& nodeVisitOrder)
@@ -171,23 +266,23 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 	static const int c_colVotesStddev = 1;
 	static const int c_colRadius = 2;
 	static const int c_colRadiusStddev = 3;
-	static const int c_colScore = 4;
-	static const int c_colScoreStddev = 5;
+	static const int c_colScoringDistance = 4;
+	static const int c_colScoringDistanceStddev = 5;
 
 	CSV csv;
 	csv.SetColumnLabel(c_colVotes, "votes");
 	csv.SetColumnLabel(c_colVotesStddev, "votes stddev");
 	csv.SetColumnLabel(c_colRadius, "radius");
 	csv.SetColumnLabel(c_colRadiusStddev, "radius stddev");
-	csv.SetColumnLabel(c_colScore, "score");
-	csv.SetColumnLabel(c_colScoreStddev, "score stddev");
+	csv.SetColumnLabel(c_colScoringDistance, "scoring dist");
+	csv.SetColumnLabel(c_colScoringDistanceStddev, "scoring dist stddev");
 
 	std::mt19937 rng = GetRNG();
 
 	int lastPercent = -1;
 	for (uint32 testIndex = 0; testIndex < numTests; ++testIndex)
 	{
-		int percent = int(100.0f * (float(testIndex) / float(numTests - 1)));
+		int percent = (numTests > 1) ? int(100.0f * (float(testIndex) / float(numTests - 1))) : 100;
 		if (lastPercent != percent)
 		{
 			printf("\r%i%%", percent);
@@ -206,7 +301,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		// Iterate!
 		std::vector<std::vector<uint64>> connectionsList(numIterations);
 		std::vector<uint32> radiusList(numIterations, ~uint32(0));
-		std::vector<float> scoreList(numIterations, 0.0f);
+		std::vector<float> scoringDistanceList(numIterations, 0.0f);
 		for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 		{
 			// Generate a random cycle which doesn't use any connections that already exist
@@ -241,12 +336,12 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			// The shortest path between two nodes is a distance between the nodes.
 			// Considering all node pairs, the longest distance is the radius
 			uint32 radius = CalculateRadius(numNodes, connectionsMade);
-			float score = CalculateScore(numNodes, connectionsMade);
+			float scoringDistance = (float)CalculateScoringDistance(numNodes, connectionsMade);
 
 			if (testIndex == 0)
 			{
 				radiusList[iteration] = radius;
-				scoreList[iteration] = score;
+				scoringDistanceList[iteration] = scoringDistance;
 			}
 
 			// Store the data in the csv
@@ -257,8 +352,8 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			csv.SetDataRunningAverage(c_colRadius, iteration, (float)radius, testIndex);
 			csv.SetDataRunningAverage(c_colRadiusStddev, iteration, (float)radius * radius, testIndex);
 
-			csv.SetDataRunningAverage(c_colScore, iteration, score, testIndex);
-			csv.SetDataRunningAverage(c_colScoreStddev, iteration, score * score, testIndex);
+			csv.SetDataRunningAverage(c_colScoringDistance, iteration, scoringDistance, testIndex);
+			csv.SetDataRunningAverage(c_colScoringDistanceStddev, iteration, scoringDistance * scoringDistance, testIndex);
 		}
 
 		// Write out the details for the first test
@@ -272,7 +367,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			{
 				for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 				{
-					fprintf(file, "Iteration %u, radius %u, score %f\n", iteration, radiusList[iteration], scoreList[iteration]);
+					fprintf(file, "Iteration %u, radius %u, scoring dist %f\n", iteration, radiusList[iteration], scoringDistanceList[iteration]);
 					for (uint64 connection : connectionsList[iteration])
 					{
 						uint32 nodeA, nodeB;
@@ -306,13 +401,13 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 	}
 
 	// Calculate stddev of score
-	for (size_t index = 0; index < csv.columns[c_colScoreStddev].data.size(); ++index)
+	for (size_t index = 0; index < csv.columns[c_colScoringDistanceStddev].data.size(); ++index)
 	{
-		float avg = csv.columns[c_colScore].data[index];
-		float avgSquared = csv.columns[c_colScoreStddev].data[index];
+		float avg = csv.columns[c_colScoringDistance].data[index];
+		float avgSquared = csv.columns[c_colScoringDistanceStddev].data[index];
 		float variance = std::max(avgSquared - avg * avg, 0.0f);
 		float stdDev = std::sqrt(variance);
-		csv.columns[c_colScoreStddev].data[index] = stdDev;
+		csv.columns[c_colScoringDistanceStddev].data[index] = stdDev;
 	}
 
 	// save the data
@@ -323,8 +418,9 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 int main(int argc, char** argv)
 {
 	_mkdir("out");
+	//DoGraphTest(4, 1, 1, "out/4");
 	DoGraphTest(10, 3, 100, "out/10");
-	DoGraphTest(60, 5, 100, "out/60");
+	//DoGraphTest(60, 5, 100, "out/60");
 	return 0;
 }
 
@@ -333,11 +429,14 @@ int main(int argc, char** argv)
 
 /*
 TODO:
-- also need to implement page rank, and can check accuracy. could give a random score to each node that determines the voting, and is the ground truth in page rank
- * the score could also just be the node index. maybe make a node "actual score" function and return node index, but comment that it could be a random score or anything else.
- * also, comparing the page rank winner list vs the actual winner list. maybe sum of abs distance of everyone from their true location? kind of like an optimal transport
- 
-! the deterministic FPE based ones
+- why do we need to normalize again in power iteration? it seems like it should converge to nonzero without. 
+! the deterministic FPE based implementation(s)
+*/
+
+/*
+Blog:
+* do it at a handful of node counts and show graphs
+
 */
 
 /*
@@ -348,4 +447,15 @@ Notes:
 * each of these cycles (hamiltonian?) decreases the radius.
 * could use FPE instead of actually shuffling the list.
 * link to the actual implementation, there are other practical things considered, like people who don't use their vote.
+* talk about page ranke
+* mention the other video that just has over a million votes, so you need every pair voted on multiple times.
+* node score is the node index for these examples
+
+pagerank:
+https://en.wikipedia.org/wiki/PageRank
+https://www.ccs.neu.edu/home/vip/teach/IRcourse/4_webgraph/notes/Pagerank%20Explained%20Correctly%20with%20Examples.html
+https://towardsdatascience.com/pagerank-algorithm-fully-explained-dc794184b4af
+https://en.wikipedia.org/wiki/Power_iteration
+* it's hard to justify damping in this context. it is like a lack of confidence in the votes. I guess there is unknown?
+ * but it also keeps V from going to zero from having all the energy leave the nodes that have only outgoing connections
 */
