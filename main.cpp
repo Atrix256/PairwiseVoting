@@ -258,7 +258,41 @@ uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connec
 	return radius;
 }
 
-void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase)
+bool GenerateConnections_RandomCycle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections)
+{
+	// Our list of nodes
+	static std::vector<uint32> nodeVisitOrder;
+	nodeVisitOrder.resize(numNodes);
+	for (uint32 index = 0; index < numNodes; ++index)
+		nodeVisitOrder[index] = index;
+
+	// Generate a random cycle which doesn't use any connections that already exist
+	uint32 attempts = 0;
+	do
+	{
+		std::shuffle(nodeVisitOrder.begin(), nodeVisitOrder.end(), rng);
+		attempts++;
+	}
+	while (!AcceptCycle(connectionsMade, nodeVisitOrder) && attempts < 100000);
+	if (attempts == 100000)
+	{
+		printf("ERROR: Couldn't find a valid random cycle at iteration %u. Stopping early.\n", iteration);
+		return false;
+	}
+
+	newConnections.resize(numNodes);
+	for (uint32 index = 0; index < numNodes; ++index)
+	{
+		uint32 nodeA = nodeVisitOrder[index];
+		uint32 nodeB = nodeVisitOrder[(index + 1) % numNodes];
+		newConnections[index] = NodesToConnectionIndex(nodeA, nodeB);
+	}
+
+	return true;
+}
+
+template <typename TGenerateConnectionsFN>
+void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase, const TGenerateConnectionsFN& GenerateConnectionsFN)
 {
 	printf("%s\n", fileNameBase);
 
@@ -289,11 +323,6 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			lastPercent = percent;
 		}
 
-		// The list of nodes we'll shuffle each iteration to get a new cycle.
-		std::vector<uint32> nodeVisitOrder(numNodes);
-		for (uint32 index = 0; index < numNodes; ++index)
-			nodeVisitOrder[index] = index;
-
 		// The list of connections already made.
 		// Used to check if a cycle is valid, only using connections not yet made
 		std::unordered_set<uint64> connectionsMade;
@@ -304,32 +333,16 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		std::vector<float> scoringDistanceList(numIterations, 0.0f);
 		for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 		{
-			// Generate a random cycle which doesn't use any connections that already exist
-			uint32 attempts = 0;
-			do
-			{
-				std::shuffle(nodeVisitOrder.begin(), nodeVisitOrder.end(), rng);
-				attempts++;
-			} while (!AcceptCycle(connectionsMade, nodeVisitOrder) && attempts < 100000);
-			if (attempts == 100000)
-			{
-				printf("ERROR: Couldn't find a valid random cycle at iteration %u. Stopping early.\n", iteration);
+			std::vector<uint64> newConnections;
+			if (!GenerateConnectionsFN(numNodes, iteration, connectionsMade, rng, newConnections))
 				break;
-			}
 
 			// In the first test, save off each round of connections, to save out to a text file
 			if (testIndex == 0)
 			{
 				connectionsList[iteration].resize(numNodes);
 				for (size_t index = 0; index < numNodes; ++index)
-				{
-					uint32 nodeA = nodeVisitOrder[index];
-					uint32 nodeB = nodeVisitOrder[(index + 1) % nodeVisitOrder.size()];
-
-					uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
-
-					connectionsList[iteration][index] = connection;
-				}
+					connectionsList[iteration][index] = newConnections[index];
 				std::sort(connectionsList[iteration].begin(), connectionsList[iteration].end());
 			}
 
@@ -400,7 +413,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		csv.columns[c_colRadiusStddev].data[index] = stdDev;
 	}
 
-	// Calculate stddev of score
+	// Calculate stddev of scoring distance
 	for (size_t index = 0; index < csv.columns[c_colScoringDistanceStddev].data.size(); ++index)
 	{
 		float avg = csv.columns[c_colScoringDistance].data[index];
@@ -418,9 +431,9 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 int main(int argc, char** argv)
 {
 	_mkdir("out");
-	//DoGraphTest(4, 1, 1, "out/4");
-	DoGraphTest(10, 3, 100, "out/10");
-	//DoGraphTest(60, 5, 100, "out/60");
+	//DoGraphTest(4, 1, 1, "out/4", GenerateConnections_RandomCycle);
+	DoGraphTest(10, 3, 100, "out/10", GenerateConnections_RandomCycle);
+	DoGraphTest(60, 5, 100, "out/60", GenerateConnections_RandomCycle);
 	return 0;
 }
 
@@ -431,6 +444,7 @@ int main(int argc, char** argv)
 TODO:
 - why do we need to normalize again in power iteration? it seems like it should converge to nonzero without. 
 ! the deterministic FPE based implementation(s)
+* when connections can't be generated, don't add the scores into the results
 */
 
 /*
@@ -450,6 +464,7 @@ Notes:
 * talk about page ranke
 * mention the other video that just has over a million votes, so you need every pair voted on multiple times.
 * node score is the node index for these examples
+* imagine if you had a low discrepancy sequence that specified which connections to make, to make a well connected graph with small radius.
 
 pagerank:
 https://en.wikipedia.org/wiki/PageRank
