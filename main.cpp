@@ -292,24 +292,25 @@ bool GenerateConnections_RandomCycle(uint32 numNodes, uint32 iteration, std::uno
 }
 
 template <typename TGenerateConnectionsFN>
-void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase, const TGenerateConnectionsFN& GenerateConnectionsFN)
+void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase, const TGenerateConnectionsFN& GenerateConnectionsFN, CSV& csv)
 {
 	printf("%s\n", fileNameBase);
 
-	static const int c_colVotes = 0;
-	static const int c_colVotesStddev = 1;
-	static const int c_colRadius = 2;
-	static const int c_colRadiusStddev = 3;
-	static const int c_colScoringDistance = 4;
-	static const int c_colScoringDistanceStddev = 5;
+	const int c_colLabel = (int)csv.columns.size();
+	const int c_colVotes = c_colLabel + 1;
+	const int c_colVotesStddev = c_colLabel + 2;
+	const int c_colRadius = c_colLabel + 3;
+	const int c_colRadiusStddev = c_colLabel + 4;
+	const int c_colScoringDistance = c_colLabel + 5;
+	const int c_colScoringDistanceStddev = c_colLabel + 6;
 
-	CSV csv;
+	csv.SetColumnLabel(c_colLabel, fileNameBase);
 	csv.SetColumnLabel(c_colVotes, "votes");
 	csv.SetColumnLabel(c_colVotesStddev, "votes stddev");
 	csv.SetColumnLabel(c_colRadius, "radius");
 	csv.SetColumnLabel(c_colRadiusStddev, "radius stddev");
-	csv.SetColumnLabel(c_colScoringDistance, "scoring dist");
-	csv.SetColumnLabel(c_colScoringDistanceStddev, "scoring dist stddev");
+	csv.SetColumnLabel(c_colScoringDistance, "normed scoring dist");
+	csv.SetColumnLabel(c_colScoringDistanceStddev, "normed scoring dist stddev");
 
 	std::mt19937 rng = GetRNG();
 
@@ -349,7 +350,12 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			// The shortest path between two nodes is a distance between the nodes.
 			// Considering all node pairs, the longest distance is the radius
 			uint32 radius = CalculateRadius(numNodes, connectionsMade);
+
+			// The scoring distance is the sum for all nodes of:
+			// the distance from the rank it is, to the rank it should be.
+			// We also normalize it by dividing by numNodes to make it comparable between graphs of different sizes
 			float scoringDistance = (float)CalculateScoringDistance(numNodes, connectionsMade);
+			scoringDistance /= (float)numNodes;
 
 			if (testIndex == 0)
 			{
@@ -423,17 +429,28 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		csv.columns[c_colScoringDistanceStddev].data[index] = stdDev;
 	}
 
+	printf("\r100%%\n");
+}
+
+void DoGraphTests(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase)
+{
+	CSV csv;
+
+	char buffer[256];
+	sprintf_s(buffer, "%s_RandomCycle", fileNameBase);
+	DoGraphTest(numNodes, numIterations, numTests, buffer, GenerateConnections_RandomCycle, csv);
+
 	// save the data
 	csv.Save("%s.csv", fileNameBase);
-	printf("\r100%%\n");
 }
 
 int main(int argc, char** argv)
 {
 	_mkdir("out");
-	//DoGraphTest(4, 1, 1, "out/4", GenerateConnections_RandomCycle);
-	DoGraphTest(10, 3, 100, "out/10", GenerateConnections_RandomCycle);
-	DoGraphTest(60, 5, 100, "out/60", GenerateConnections_RandomCycle);
+
+	DoGraphTests(10, 3, 100, "out/10");
+	DoGraphTests(60, 5, 100, "out/60");
+
 	return 0;
 }
 
