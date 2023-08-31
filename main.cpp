@@ -41,6 +41,42 @@ std::mt19937 GetRNG()
 	#endif
 }
 
+uint32 NextPowerOf2(uint32 value)
+{
+	uint32 ret = 1;
+	while (ret < value)
+		ret *= 2;
+	return ret;
+}
+
+// Returns the sum of 1 to N
+inline int GaussSum(int N)
+{
+	return N * (N + 1) / 2;
+}
+
+// Returns the floor of the possibly fractional N that is needed to reach this sum
+inline int InverseGaussSum(int sum)
+{
+	return (int)std::floor(std::sqrt(2.0f * float(sum) + 0.25) - 0.5f);
+}
+
+// Turn a connection permutation index into two node indices
+inline void ConnectionPermutationIndexToNodes(int connectionIndex, int numConnections, int numGroups, uint32& nodeA, uint32& nodeB)
+{
+	// Reverse the connection index so we can use InverseGaussSum() to find the group index.
+	// That group index is reversed, so unreverse it to get the first node in the connection.
+	int reversedConnectionIndex = numConnections - connectionIndex - 1;
+	int reversedGroupIndex = InverseGaussSum(reversedConnectionIndex);
+	nodeA = numGroups - reversedGroupIndex - 1;
+
+	// If we weren't reversed, the offset from the beginning of the current group would be added to nodeA+1 to get nodeB.
+	// Since we are reversed, we instead need to add to nodeA how far we are from the beginning of the next group.
+	int reversedNextGroupStartIndex = GaussSum(reversedGroupIndex + 1);
+	int distanceToNextGroup = reversedNextGroupStartIndex - reversedConnectionIndex;
+	nodeB = nodeA + distanceToNextGroup;
+}
+
 inline uint64 NodesToConnectionIndex(uint32 nodeA, uint32 nodeB)
 {
 	if (nodeA > nodeB)
@@ -269,7 +305,73 @@ uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connec
 	return radius;
 }
 
-bool GenerateConnections_RandomCycle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections)
+// For the first iteration, makes a simple cycle of 0 -> 1 -> 2 -> ... -> (numNodes-1) -> 0
+// This isn't random, but you could shuffle the nodes before doing this to make them random.
+// For every other iteration, use FPE to pick numNodes new links which haven't yet been chosen.
+// it doesn't have to check the existing connections list, it knows that any connection it gets
+// from FPE is going to be fresh, unless it is of the form of N -> N + 1, which was made in the
+// first iteration.
+bool GenerateConnections_FPE1(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex)
+{
+	newConnections.clear();
+
+	// make a simple, ordered cycle
+	if (iteration == 0)
+	{
+		for (uint32 nodeA = 0; nodeA < numNodes; ++nodeA)
+		{
+			uint32 nodeB = (nodeA + 1) % numNodes;
+			uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
+			connectionsMade.insert(connection);
+			newConnections.push_back(connection);
+		}
+		return true;
+	}
+
+	// Get numNodes number of connections that we haven't seen before.
+	// We are using FPE to shuffle the connection order.
+	// A connection can be invalid if it is of the form N->N+1, or if
+	// the connection is beyond c_numConnections.
+	// The first is because iteration 0 adds those.
+	// The second is because FPE iterates to the next power of 2.
+	const uint32 c_numConnections = GaussSum(numNodes-1);
+	while (newConnections.size() < numNodes)
+	{
+		if (internalIndex >= NextPowerOf2(c_numConnections))
+		{
+			printf("Ran out of connections!");
+			return false;
+		}
+
+		// get next connection
+		uint32 connectionPermutationIndex = FPE_Encrypt(internalIndex, c_FPEKey, c_numConnections, c_FPENumRounds);
+		internalIndex++;
+
+		// Ignore connection permutation indices that are out of bounds.
+		// FPE has to round c_numConnections up to the next power of 2, so this happens if 
+		// c_numConnections is not a power of 2.
+		if (connectionPermutationIndex >= c_numConnections)
+			continue;
+
+		// Get the nodes for this connection permutation index
+		uint32 nodeA, nodeB;
+		ConnectionPermutationIndexToNodes(connectionPermutationIndex, c_numConnections, numNodes - 1, nodeA, nodeB);
+
+		// Ignore if the connection was already made in the first iteration
+		if ((nodeA + 1) % numNodes == nodeB || (nodeB + 1) % numNodes == nodeA)
+			continue;
+
+		// accept the valid connection
+		uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
+		connectionsMade.insert(connection);
+		newConnections.push_back(connection);
+	}
+
+	return true;
+}
+
+// Makes a random cycle of the graph nodes, which only use connections not yet used
+bool GenerateConnections_RandomCycle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex)
 {
 	// Our list of nodes
 	static std::vector<uint32> nodeVisitOrder;
@@ -343,10 +445,11 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		std::vector<std::vector<uint64>> connectionsList(numIterations);
 		std::vector<uint32> radiusList(numIterations, ~uint32(0));
 		std::vector<float> scoringDistanceList(numIterations, 0.0f);
+		uint32 internalIndex = 0;
 		for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 		{
 			std::vector<uint64> newConnections;
-			if (!GenerateConnectionsFN(numNodes, iteration, connectionsMade, rng, newConnections))
+			if (!GenerateConnectionsFN(numNodes, iteration, connectionsMade, rng, newConnections, internalIndex))
 				break;
 
 			// In the first test, save off each round of connections, to save out to a text file
@@ -397,7 +500,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 			{
 				for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 				{
-					fprintf(file, "Iteration %u, radius %u, scoring dist %f\n", iteration, radiusList[iteration], scoringDistanceList[iteration]);
+					fprintf(file, "Iteration %u, radius %u, normed scoring dist %f\n", iteration, radiusList[iteration], scoringDistanceList[iteration]);
 					for (uint64 connection : connectionsList[iteration])
 					{
 						uint32 nodeA, nodeB;
@@ -446,10 +549,13 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 void DoGraphTests(uint32 numNodes, uint32 numIterations, uint32 numTests, const char* fileNameBase)
 {
 	CSV csv;
-
 	char buffer[256];
+
 	sprintf_s(buffer, "%s_RandomCycle", fileNameBase);
 	DoGraphTest(numNodes, numIterations, numTests, buffer, GenerateConnections_RandomCycle, csv);
+
+	sprintf_s(buffer, "%s_FPE1", fileNameBase);
+	DoGraphTest(numNodes, numIterations, numTests, buffer, GenerateConnections_FPE1, csv);
 
 	// save the data
 	csv.Save("%s.csv", fileNameBase);
@@ -457,6 +563,11 @@ void DoGraphTests(uint32 numNodes, uint32 numIterations, uint32 numTests, const 
 
 int main(int argc, char** argv)
 {
+	// TODO: why do these give the same values?
+	//uint32 connectionPermutationIndex = FPE_Encrypt(65, c_FPEKey, c_numConnections, c_FPENumRounds);
+	//uint32 connectionPermutationIndex = FPE_Encrypt(66, c_FPEKey, c_numConnections, c_FPENumRounds);
+
+
 	_mkdir("out");
 
 	// Make a white noise texture by shuffling another texture that has a flat histogram
@@ -500,9 +611,13 @@ int main(int argc, char** argv)
 
 /*
 TODO:
+?? why does your method win? lower mean and std dev after the first round.
+?? why does first round differ from random cycle? it shouldn't other than maybe because it's deterministic
+? why does "10 nodes" have 0 score for iteration 0, it should be higher!
 ! the deterministic FPE based implementation(s)
 * when connections can't be generated, don't add the scores into the results.
 - why do we need to normalize again in power iteration? it seems like it should converge to nonzero without.
+* maybe don't need to implement the other voting method?
 */
 
 /*
@@ -510,6 +625,7 @@ Blog:
 * do it at a handful of node counts and show graphs
 * show the FPE images, dfts, and histograms
 * show the round trip of FPE for 8 items
+* link to inverted gauss post for turning a connection index into specific nodes
 */
 
 /*

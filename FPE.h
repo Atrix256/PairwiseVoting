@@ -4,6 +4,7 @@
 
 typedef uint32_t uint32;
 
+// data is the item index to shuffle
 // numItems must be a power of 2
 // numRounds must be greater than 0
 // key may be any value, including 0
