@@ -20,7 +20,6 @@ static const float	c_pageRankConvergenceEpsilon = 0.001f;
 static const float	c_pageRankDamping = 0.85f;
 
 static const uint32 c_FPENumRounds = 4;
-static const uint32 c_FPEKey = 0x1337beef;
 
 static const int c_FPEImageSize = 256;
 
@@ -113,8 +112,11 @@ float Distance(const std::vector<float>& A, const std::vector<float>& B)
 uint32 CalculateScoringDistance(uint32 numNodes, const std::unordered_set<uint64>& connections)
 {
 	// We need a node score to determine which node would win in a match or a vote.
-	// We will just use the node index cause it doesn't really matter.
-	auto NodeScore = [](uint32 node) { return (float)node; };
+	// Hash the node index to get a size_t score.
+	auto NodeScore = [](uint32 node)
+	{
+		return std::hash<uint32>()(node);
+	};
 
 	// make a matrix that describes how node values flow from each node to others.
 	// Row r describes how values flow into node r from other nodes.
@@ -180,29 +182,43 @@ uint32 CalculateScoringDistance(uint32 numNodes, const std::unordered_set<uint64
 	}
 
 	// Make a sorted list of the nodes, from highest score to lowest
-	struct NodeInfo
+	// using the page rank score
+	struct NodeScoreInfo
 	{
 		uint32 nodeIndex;
 		float score;
 	};
-	std::vector<NodeInfo> scoreBoard(numNodes);
+	std::vector<NodeScoreInfo> scoreBoard(numNodes);
 	for (uint32 i = 0; i < numNodes; ++i)
 	{
 		scoreBoard[i].nodeIndex = i;
 		scoreBoard[i].score = NewV[i];
 	}
-	std::sort(scoreBoard.begin(), scoreBoard.end(), [](const NodeInfo& A, const NodeInfo& B) {return A.score > B.score; });
+	std::sort(scoreBoard.begin(), scoreBoard.end(), [](const NodeScoreInfo& A, const NodeScoreInfo& B) {return A.score > B.score; });
+
+	// do the same, using the actual node score
+	struct ActualNodeScoreInfo
+	{
+		uint32 nodeIndex;
+		size_t actualScore;
+	};
+	std::vector<ActualNodeScoreInfo> actualScoreBoard(numNodes);
+	for (uint32 i = 0; i < numNodes; ++i)
+	{
+		actualScoreBoard[i].nodeIndex = i;
+		actualScoreBoard[i].actualScore = NodeScore(i);
+	}
+	std::sort(actualScoreBoard.begin(), actualScoreBoard.end(), [](const ActualNodeScoreInfo& A, const ActualNodeScoreInfo& B) {return A.actualScore > B.actualScore; });
 
 	// Calculate the accuracy of the score.
 	// The accuracy is the sum of the abs difference between the ranking in the scoreboard,
 	// and what rank the node should be at.
-	// I believe this is equivelent to optimal transport.
-	// A node should be at (numNodes - nodeIndex - 1) in the scoreboard, since a node's score
-	// is the same as it's node index. 0 will always lose to 1, will always lose to 2, etc.
+	// I believe this is equivelent to optimal transport and 1-Wasserstein distance
 	uint32 scoringDistance = 0;
-	for (uint32 rank = 0; rank < numNodes; ++rank)
+	for (uint32 i = 0; i < numNodes; ++i)
 	{
-		uint32 actualRank = (numNodes - scoreBoard[rank].nodeIndex - 1);
+		uint32 rank = (uint32)(std::find_if(scoreBoard.begin(), scoreBoard.end(), [=](const NodeScoreInfo& node) {return node.nodeIndex == i; }) - scoreBoard.begin());
+		uint32 actualRank = (uint32)(std::find_if(actualScoreBoard.begin(), actualScoreBoard.end(), [=](const ActualNodeScoreInfo& node) {return node.nodeIndex == i; }) - actualScoreBoard.begin());
 		if (rank <= actualRank)
 			scoringDistance += actualRank - rank;
 		else
@@ -311,7 +327,7 @@ uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connec
 // it doesn't have to check the existing connections list, it knows that any connection it gets
 // from FPE is going to be fresh, unless it is of the form of N -> N + 1, which was made in the
 // first iteration.
-bool GenerateConnections_FPE1(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex)
+bool GenerateConnections_FPE1(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex, uint32 testIndex)
 {
 	newConnections.clear();
 
@@ -344,7 +360,7 @@ bool GenerateConnections_FPE1(uint32 numNodes, uint32 iteration, std::unordered_
 		}
 
 		// get next connection
-		uint32 connectionPermutationIndex = FPE_Encrypt(internalIndex, c_FPEKey, c_numConnections, c_FPENumRounds);
+		uint32 connectionPermutationIndex = FPE_Encrypt(internalIndex, testIndex, c_numConnections, c_FPENumRounds);
 		internalIndex++;
 
 		// Ignore connection permutation indices that are out of bounds.
@@ -371,7 +387,7 @@ bool GenerateConnections_FPE1(uint32 numNodes, uint32 iteration, std::unordered_
 }
 
 // Makes a random cycle of the graph nodes, which only use connections not yet used
-bool GenerateConnections_RandomCycle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex)
+bool GenerateConnections_RandomCycle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex, uint32 testIndex)
 {
 	// Our list of nodes
 	static std::vector<uint32> nodeVisitOrder;
@@ -449,7 +465,7 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		for (uint32 iteration = 0; iteration < numIterations; ++iteration)
 		{
 			std::vector<uint64> newConnections;
-			if (!GenerateConnectionsFN(numNodes, iteration, connectionsMade, rng, newConnections, internalIndex))
+			if (!GenerateConnectionsFN(numNodes, iteration, connectionsMade, rng, newConnections, internalIndex, testIndex))
 				break;
 
 			// In the first test, save off each round of connections, to save out to a text file
@@ -563,11 +579,6 @@ void DoGraphTests(uint32 numNodes, uint32 numIterations, uint32 numTests, const 
 
 int main(int argc, char** argv)
 {
-	// TODO: why do these give the same values?
-	//uint32 connectionPermutationIndex = FPE_Encrypt(65, c_FPEKey, c_numConnections, c_FPENumRounds);
-	//uint32 connectionPermutationIndex = FPE_Encrypt(66, c_FPEKey, c_numConnections, c_FPENumRounds);
-
-
 	_mkdir("out");
 
 	// Make a white noise texture by shuffling another texture that has a flat histogram
@@ -580,7 +591,7 @@ int main(int argc, char** argv)
 		std::vector<unsigned char> pixels2(c_FPEImageSize * c_FPEImageSize);
 		for (uint32 i = 0; i < c_FPEImageSize * c_FPEImageSize; ++i)
 		{
-			uint32 index = FPE_Encrypt(i, c_FPEKey, c_FPEImageSize * c_FPEImageSize, c_FPENumRounds);
+			uint32 index = FPE_Encrypt(i, 0x1337beef, c_FPEImageSize * c_FPEImageSize, c_FPENumRounds);
 			pixels2[index] = pixels[i];
 		}
 		stbi_write_png("out/_fpe_after.png", c_FPEImageSize, c_FPEImageSize, 1, pixels2.data(), 0);
@@ -591,8 +602,8 @@ int main(int argc, char** argv)
 		static const uint32 c_numItems = 8;
 		for (uint32 index = 0; index < c_numItems; ++index)
 		{
-			uint32 encrypted = FPE_Encrypt(index, c_FPEKey, c_numItems, c_FPENumRounds);
-			uint32 decrypted = FPE_Decrypt(encrypted, c_FPEKey, c_numItems, c_FPENumRounds);
+			uint32 encrypted = FPE_Encrypt(index, 0x1337beef, c_numItems, c_FPENumRounds);
+			uint32 decrypted = FPE_Decrypt(encrypted, 0x1337beef, c_numItems, c_FPENumRounds);
 
 			printf("%u -> %u -> %u\n", index, encrypted, decrypted);
 		}
@@ -612,12 +623,9 @@ int main(int argc, char** argv)
 /*
 TODO:
 ?? why does your method win? lower mean and std dev after the first round.
-?? why does first round differ from random cycle? it shouldn't other than maybe because it's deterministic
-? why does "10 nodes" have 0 score for iteration 0, it should be higher!
-! the deterministic FPE based implementation(s)
+! the second deterministic FPE method?
 * when connections can't be generated, don't add the scores into the results.
 - why do we need to normalize again in power iteration? it seems like it should converge to nonzero without.
-* maybe don't need to implement the other voting method?
 */
 
 /*
@@ -626,6 +634,7 @@ Blog:
 * show the FPE images, dfts, and histograms
 * show the round trip of FPE for 8 items
 * link to inverted gauss post for turning a connection index into specific nodes
+* talk about how you compare the high schore list vs actual high schore list
 */
 
 /*
