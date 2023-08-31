@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS // for stb
+
 #include <stdio.h>
 #include <vector>
 #include <random>
@@ -8,10 +10,19 @@
 #include <stdarg.h>
 
 #include "csv.h"
+#include "FPE.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 static const size_t	c_pageRankMaxIterations = 100;
 static const float	c_pageRankConvergenceEpsilon = 0.001f;
 static const float	c_pageRankDamping = 0.85f;
+
+static const uint32 c_FPENumRounds = 4;
+static const uint32 c_FPEKey = 0x1337beef;
+
+static const int c_FPEImageSize = 256;
 
 #define DETERMINISTIC() true
 
@@ -448,6 +459,36 @@ int main(int argc, char** argv)
 {
 	_mkdir("out");
 
+	// Make a white noise texture by shuffling another texture that has a flat histogram
+	{
+		std::vector<unsigned char> pixels(c_FPEImageSize * c_FPEImageSize);
+		for (uint32 i = 0; i < c_FPEImageSize * c_FPEImageSize; ++i)
+			pixels[i] = (unsigned char)(i % 256);
+		stbi_write_png("out/_fpe_before.png", c_FPEImageSize, c_FPEImageSize, 1, pixels.data(), 0);
+
+		std::vector<unsigned char> pixels2(c_FPEImageSize * c_FPEImageSize);
+		for (uint32 i = 0; i < c_FPEImageSize * c_FPEImageSize; ++i)
+		{
+			uint32 index = FPE_Encrypt(i, c_FPEKey, c_FPEImageSize * c_FPEImageSize, c_FPENumRounds);
+			pixels2[index] = pixels[i];
+		}
+		stbi_write_png("out/_fpe_after.png", c_FPEImageSize, c_FPEImageSize, 1, pixels2.data(), 0);
+	}
+
+	// Show FPE round trip
+	{
+		static const uint32 c_numItems = 8;
+		for (uint32 index = 0; index < c_numItems; ++index)
+		{
+			uint32 encrypted = FPE_Encrypt(index, c_FPEKey, c_numItems, c_FPENumRounds);
+			uint32 decrypted = FPE_Decrypt(encrypted, c_FPEKey, c_numItems, c_FPENumRounds);
+
+			printf("%u -> %u -> %u\n", index, encrypted, decrypted);
+		}
+	}
+
+	// Do the graph tests, with various sized graphs
+
 	DoGraphTests(10, 3, 100, "out/10");
 	DoGraphTests(60, 5, 100, "out/60");
 
@@ -459,15 +500,16 @@ int main(int argc, char** argv)
 
 /*
 TODO:
-- why do we need to normalize again in power iteration? it seems like it should converge to nonzero without. 
 ! the deterministic FPE based implementation(s)
-* when connections can't be generated, don't add the scores into the results
+* when connections can't be generated, don't add the scores into the results.
+- why do we need to normalize again in power iteration? it seems like it should converge to nonzero without.
 */
 
 /*
 Blog:
 * do it at a handful of node counts and show graphs
-
+* show the FPE images, dfts, and histograms
+* show the round trip of FPE for 8 items
 */
 
 /*

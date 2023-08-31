@@ -2,8 +2,11 @@
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="FPE.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="csv.h" />
+    <ClInclude Include="FPE.h" />
+    <ClInclude Include="stb_image_write.h" />
   </ItemGroup>
 </Project>
