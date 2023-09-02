@@ -611,33 +611,9 @@ int main(int argc, char** argv)
 
 	// Do the graph tests, with various sized graphs
 
-	//DoGraphTests(10, 3, 100, "out/10");
-	//DoGraphTests(60, 5, 100, "out/60");
-	DoGraphTests(100, 6, 100, "out/100");
+	DoGraphTests(10, 3, 100, "out/10");
+	DoGraphTests(60, 5, 100, "out/60");
+	DoGraphTests(100, 5, 100, "out/100");
 
 	return 0;
 }
-
-// TODO: should you do tournament selection in a graph test, to compare apples to apples?
-
-/*
-Blog:
-* do it at a handful of node counts and show graphs
-* show the FPE images, dfts, and histograms
-* show the round trip of FPE for 8 items
-* link to inverted gauss post for turning a connection index into specific nodes
-* talk about how you compare the high schore list vs actual high schore list
-*/
-
-/*
-Notes:
-* link to the actual SoME3 implementation, there are other practical things considered, like people who don't use their vote.
-
-pagerank links:
-https://en.wikipedia.org/wiki/PageRank
-https://www.ccs.neu.edu/home/vip/teach/IRcourse/4_webgraph/notes/Pagerank%20Explained%20Correctly%20with%20Examples.html
-https://towardsdatascience.com/pagerank-algorithm-fully-explained-dc794184b4af
-https://en.wikipedia.org/wiki/Power_iteration
-* it's hard to justify damping in this context. it is like a lack of confidence in the votes. I guess there is unknown?
- * but it also keeps V from going to zero from having all the energy leave the nodes that have only outgoing connections
-*/
