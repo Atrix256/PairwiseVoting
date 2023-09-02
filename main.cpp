@@ -611,22 +611,14 @@ int main(int argc, char** argv)
 
 	// Do the graph tests, with various sized graphs
 
-	DoGraphTests(10, 3, 100, "out/10");
-	DoGraphTests(60, 5, 100, "out/60");
+	//DoGraphTests(10, 3, 100, "out/10");
+	//DoGraphTests(60, 5, 100, "out/60");
+	DoGraphTests(100, 6, 100, "out/100");
 
 	return 0;
 }
 
-// Implementing this video, and inspired to add more
-// https://www.youtube.com/watch?v=XSDBbCaO-kc
-
-/*
-TODO:
-?? why does your method win? lower mean and std dev after the first round.
-! the second deterministic FPE method?
-* when connections can't be generated, don't add the scores into the results.
-- why do we need to normalize again in power iteration? it seems like it should converge to nonzero without.
-*/
+// TODO: should you do tournament selection in a graph test, to compare apples to apples?
 
 /*
 Blog:
@@ -639,18 +631,9 @@ Blog:
 
 /*
 Notes:
-* the video is great, and explains the motivation for the algorithm.
-* the algorithm itself is real simple and you don't need eigenvalues or adjacency graphs at runtime.
-* just visit every node in a random order, making sure no path has been taken before.
-* each of these cycles (hamiltonian?) decreases the radius.
-* could use FPE instead of actually shuffling the list.
-* link to the actual implementation, there are other practical things considered, like people who don't use their vote.
-* talk about page ranke
-* mention the other video that just has over a million votes, so you need every pair voted on multiple times.
-* node score is the node index for these examples
-* imagine if you had a low discrepancy sequence that specified which connections to make, to make a well connected graph with small radius.
+* link to the actual SoME3 implementation, there are other practical things considered, like people who don't use their vote.
 
-pagerank:
+pagerank links:
 https://en.wikipedia.org/wiki/PageRank
 https://www.ccs.neu.edu/home/vip/teach/IRcourse/4_webgraph/notes/Pagerank%20Explained%20Correctly%20with%20Examples.html
 https://towardsdatascience.com/pagerank-algorithm-fully-explained-dc794184b4af
