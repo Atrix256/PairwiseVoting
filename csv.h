@@ -2,6 +2,11 @@
 
 typedef uint32_t uint32;
 
+inline float Lerp(float A, float B, float t)
+{
+	return A * (1.0f - t) + B * t;
+}
+
 struct CSV
 {
 	struct Column
@@ -99,11 +104,5 @@ struct CSV
 		// close file
 		fclose(file);
 		return true;
-	}
-
-private:
-	static float Lerp(float A, float B, float t)
-	{
-		return A * (1.0f - t) + B * t;
 	}
 };

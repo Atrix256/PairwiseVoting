@@ -109,13 +109,13 @@ float Distance(const std::vector<float>& A, const std::vector<float>& B)
 	return std::sqrt(ret);
 }
 
-uint32 CalculateScoringDistance(uint32 numNodes, const std::unordered_set<uint64>& connections)
+uint32 CalculateScoringDistance(uint32 numNodes, const std::unordered_set<uint64>& connections, uint32 testIndex)
 {
 	// We need a node score to determine which node would win in a match or a vote.
 	// Hash the node index to get a size_t score.
-	auto NodeScore = [](uint32 node)
+	auto NodeScore = [testIndex](uint32 node)
 	{
-		return std::hash<uint32>()(node);
+		return std::hash<uint32>()(node ^ testIndex);
 	};
 
 	// make a matrix that describes how node values flow from each node to others.
@@ -268,18 +268,16 @@ uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std:
 	auto cmp = [](const PathEntry& A, const PathEntry& B) { return A.distance > B.distance; };
 	std::priority_queue<PathEntry, std::vector<PathEntry>, decltype(cmp)> paths(cmp);
 
-	std::unordered_set<uint32> nodesAlreadyVisited;
+	std::unordered_set<uint32> nodesHandled; // When a node goes into the paths queue, it gets inserted here too
 
 	paths.push({ nodeA, 0 });
+	nodesHandled.insert(nodeA);
 
 	while (paths.size() > 0)
 	{
 		// Get the shortest path and remove it from the list
 		PathEntry bestPath = paths.top();
 		paths.pop();
-
-		// remember that we've already visited this lastNode so we don't do it again and back track
-		nodesAlreadyVisited.insert(bestPath.lastNode);
 
 		// If this node connects to nodeB, we are done!
 		uint64 connection = NodesToConnectionIndex(bestPath.lastNode, nodeB);
@@ -289,26 +287,33 @@ uint32 CalculateDistance(uint32 nodeA, uint32 nodeB, uint32 numNodes, const std:
 		// Otherwise, add all the connections from this node to check
 		for (uint32 i = 0; i < numNodes; ++i)
 		{
-			// only consider going to a node if we haven't already visited it
-			if (nodesAlreadyVisited.count(i) > 0)
+			// only consider going to a node if we haven't already put it in the paths list
+			if (nodesHandled.count(i) > 0)
 				continue;
 
 			uint64 connection = NodesToConnectionIndex(bestPath.lastNode, i);
 			if (connectionsMade.count(connection) > 0)
+			{
 				paths.push({ i, bestPath.distance + 1 });
+
+				// Remember that we've handle this node
+				nodesHandled.insert(i);
+			}
 		}
 	}
 
 	// This shouldn't ever happen.
 	// This means there isn't a connection from nodeA to nodeB, but after
 	// the first iteration, the graph should be connected.
-	printf("ERROR: CalculateDistance() couldn't find a path!\n");
+	printf("ERROR: CalculateDistance() couldn't find a path from %u to %u!\n", nodeA, nodeB);
 	return ~uint32(0);
 }
 
-uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connectionsMade)
+uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connectionsMade, float& avgDistance)
 {
 	// Note: this loop could be parallelized across threads
+	avgDistance = 0.0f;
+	int avgDistanceSamples = 0;
 	uint32 radius = 0;
 	for (uint32 nodeA = 0; nodeA < numNodes; ++nodeA)
 	{
@@ -316,9 +321,88 @@ uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connec
 		{
 			uint32 distance = CalculateDistance(nodeA, nodeB, numNodes, connectionsMade);
 			radius = std::max(radius, distance);
+			avgDistance = Lerp(avgDistance, float(distance), 1.0f / float(avgDistanceSamples + 1));
+			avgDistanceSamples++;
 		}
 	}
 	return radius;
+}
+
+bool GenerateConnections_Rings(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex, uint32 testIndex)
+{
+	/*
+	static uint32 lastTestIndex = ~uint32(0);
+
+	if (lastTestIndex != testIndex)
+	{
+		lastTestIndex = testIndex;
+		printf("test %u:\n", testIndex);
+	}
+	printf("  cycle %u\n", iteration);
+	*/
+
+	newConnections.clear();
+
+	const uint32 maxAddValue = uint32(std::ceil(float(numNodes) / 2.0f) - 1.0f);
+	const uint32 addValue = iteration + 1;
+	if (addValue > maxAddValue)
+	{
+		printf("More iterations requested than are physically possible! %u nodes can only do %u iterations / cycles.", numNodes, maxAddValue);
+		return false;
+	}
+
+	for (uint32 i = 0; i < numNodes; ++i)
+	{
+		uint32 nodeA = i;
+		uint32 nodeB = (nodeA + addValue) % numNodes;
+
+		uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
+
+		if (nodeA >= numNodes)
+		{
+			printf("invalid nodeA!\n");
+		}
+
+		if (nodeB >= numNodes)
+		{
+			printf("invalid nodeB!\n");
+		}
+
+		if (connectionsMade.count(connection) != 0)
+		{
+			printf("Duplicate connection! %u - %u\n", nodeA, nodeB);
+		}
+
+		connectionsMade.insert(connection);
+		newConnections.push_back(connection);
+	}
+
+	return true;
+}
+
+// same as GenerateConnections_Rings, but the addValue is in shuffled order
+bool GenerateConnections_RingsShuffle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex, uint32 testIndex)
+{
+	const uint32 c_key = testIndex ^ 0x1337beef;
+	const uint32 c_maxIterations = uint32(std::ceil(float(numNodes) / 2.0f) - 1.0f);
+
+	static uint32 shuffledIterationIndex = 0;
+
+	// always start with "cycle 1" to ensure a connected graph
+	if (iteration == 0)
+		shuffledIterationIndex = FPE_Decrypt(0, c_key, c_maxIterations, c_FPENumRounds);
+
+	// find the next valid cycle using FPE
+	uint32 shuffledIteration;
+	do
+	{
+		shuffledIteration = FPE_Encrypt(shuffledIterationIndex, c_key, c_maxIterations, c_FPENumRounds);
+		shuffledIterationIndex = (shuffledIterationIndex + 1) % c_maxIterations;
+	}
+	while(shuffledIteration >= c_maxIterations);
+
+	// generate a cycle
+	return GenerateConnections_Rings(numNodes, shuffledIteration, connectionsMade, rng, newConnections, internalIndex, testIndex);
 }
 
 // For the first iteration, makes a simple cycle of 0 -> 1 -> 2 -> ... -> (numNodes-1) -> 0
@@ -360,7 +444,7 @@ bool GenerateConnections_FPE1(uint32 numNodes, uint32 iteration, std::unordered_
 		}
 
 		// get next connection
-		uint32 connectionPermutationIndex = FPE_Encrypt(internalIndex, testIndex, c_numConnections, c_FPENumRounds);
+		uint32 connectionPermutationIndex = FPE_Encrypt(internalIndex, testIndex ^ 0x1337beef, c_numConnections, c_FPENumRounds);
 		internalIndex++;
 
 		// Ignore connection permutation indices that are out of bounds.
@@ -430,14 +514,18 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 	const int c_colVotesStddev = c_colLabel + 2;
 	const int c_colRadius = c_colLabel + 3;
 	const int c_colRadiusStddev = c_colLabel + 4;
-	const int c_colScoringDistance = c_colLabel + 5;
-	const int c_colScoringDistanceStddev = c_colLabel + 6;
+	const int c_colAvgDistance = c_colLabel + 5;
+	const int c_colAvgDistanceStddev = c_colLabel + 6;
+	const int c_colScoringDistance = c_colLabel + 7;
+	const int c_colScoringDistanceStddev = c_colLabel + 8;
 
 	csv.SetColumnLabel(c_colLabel, fileNameBase);
 	csv.SetColumnLabel(c_colVotes, "votes");
 	csv.SetColumnLabel(c_colVotesStddev, "votes stddev");
 	csv.SetColumnLabel(c_colRadius, "radius");
 	csv.SetColumnLabel(c_colRadiusStddev, "radius stddev");
+	csv.SetColumnLabel(c_colAvgDistance, "avgDist");
+	csv.SetColumnLabel(c_colAvgDistanceStddev, "avgDist stddev");
 	csv.SetColumnLabel(c_colScoringDistance, "normed scoring dist");
 	csv.SetColumnLabel(c_colScoringDistanceStddev, "normed scoring dist stddev");
 
@@ -479,12 +567,13 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 
 			// The shortest path between two nodes is a distance between the nodes.
 			// Considering all node pairs, the longest distance is the radius
-			uint32 radius = CalculateRadius(numNodes, connectionsMade);
+			float avgDistance = 0.0f;
+			uint32 radius = CalculateRadius(numNodes, connectionsMade, avgDistance);
 
 			// The scoring distance is the sum for all nodes of:
 			// the distance from the rank it is, to the rank it should be.
 			// We also normalize it by dividing by numNodes to make it comparable between graphs of different sizes
-			float scoringDistance = (float)CalculateScoringDistance(numNodes, connectionsMade);
+			float scoringDistance = (float)CalculateScoringDistance(numNodes, connectionsMade, testIndex);
 			scoringDistance /= (float)numNodes;
 
 			if (testIndex == 0)
@@ -500,6 +589,9 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 
 			csv.SetDataRunningAverage(c_colRadius, iteration, (float)radius, testIndex);
 			csv.SetDataRunningAverage(c_colRadiusStddev, iteration, (float)radius * radius, testIndex);
+
+			csv.SetDataRunningAverage(c_colAvgDistance, iteration, avgDistance, testIndex);
+			csv.SetDataRunningAverage(c_colAvgDistanceStddev, iteration, avgDistance * avgDistance, testIndex);
 
 			csv.SetDataRunningAverage(c_colScoringDistance, iteration, scoringDistance, testIndex);
 			csv.SetDataRunningAverage(c_colScoringDistanceStddev, iteration, scoringDistance * scoringDistance, testIndex);
@@ -549,6 +641,16 @@ void DoGraphTest(uint32 numNodes, uint32 numIterations, uint32 numTests, const c
 		csv.columns[c_colRadiusStddev].data[index] = stdDev;
 	}
 
+	// Calculate stddev of radius
+	for (size_t index = 0; index < csv.columns[c_colAvgDistanceStddev].data.size(); ++index)
+	{
+		float avg = csv.columns[c_colAvgDistance].data[index];
+		float avgSquared = csv.columns[c_colAvgDistanceStddev].data[index];
+		float variance = std::max(avgSquared - avg * avg, 0.0f);
+		float stdDev = std::sqrt(variance);
+		csv.columns[c_colAvgDistanceStddev].data[index] = stdDev;
+	}
+
 	// Calculate stddev of scoring distance
 	for (size_t index = 0; index < csv.columns[c_colScoringDistanceStddev].data.size(); ++index)
 	{
@@ -572,6 +674,12 @@ void DoGraphTests(uint32 numNodes, uint32 numIterations, uint32 numTests, const 
 
 	sprintf_s(buffer, "%s_FPE1", fileNameBase);
 	DoGraphTest(numNodes, numIterations, numTests, buffer, GenerateConnections_FPE1, csv);
+
+	sprintf_s(buffer, "%s_Rings", fileNameBase);
+	DoGraphTest(numNodes, numIterations, numTests, buffer, GenerateConnections_Rings, csv);
+
+	sprintf_s(buffer, "%s_RingsShuffle", fileNameBase);
+	DoGraphTest(numNodes, numIterations, numTests, buffer, GenerateConnections_RingsShuffle, csv);
 
 	// save the data
 	csv.Save("%s.csv", fileNameBase);
@@ -611,9 +719,11 @@ int main(int argc, char** argv)
 
 	// Do the graph tests, with various sized graphs
 
+	DoGraphTests(9, 3, 100, "out/9");
 	DoGraphTests(10, 3, 100, "out/10");
 	DoGraphTests(60, 5, 100, "out/60");
 	DoGraphTests(100, 5, 100, "out/100");
+	DoGraphTests(101, 5, 100, "out/101");
 
 	return 0;
 }
