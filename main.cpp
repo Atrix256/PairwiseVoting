@@ -332,8 +332,6 @@ bool GenerateConnections_Rings(uint32 numNodes, uint32 iteration, std::unordered
 {
 	newConnections.clear();
 
-	static std::vector<uint32> values;
-
 	const uint32 maxAddValue = uint32(std::ceil(float(numNodes) / 2.0f) - 1.0f);
 	const uint32 addValue = iteration + 1;
 	if (addValue > maxAddValue)
@@ -342,18 +340,10 @@ bool GenerateConnections_Rings(uint32 numNodes, uint32 iteration, std::unordered
 		return false;
 	}
 
-	if (iteration == 0)
-	{
-		values.resize(numNodes);
-		for (uint32 i = 0; i < numNodes; ++i)
-			values[i] = i;
-	}
-
 	for (uint32 i = 0; i < numNodes; ++i)
 	{
-		uint32 nodeA = values[i];
+		uint32 nodeA = i;
 		uint32 nodeB = (nodeA + addValue) % numNodes;
-		values[i] = nodeB;
 
 		uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
 
@@ -369,7 +359,7 @@ bool GenerateConnections_Rings(uint32 numNodes, uint32 iteration, std::unordered
 
 		if (connectionsMade.count(connection) != 0)
 		{
-			printf("Duplicate connection!!\n");
+			printf("Duplicate connection! %u - %u\n", nodeA, nodeB);
 		}
 
 		connectionsMade.insert(connection);
@@ -382,86 +372,26 @@ bool GenerateConnections_Rings(uint32 numNodes, uint32 iteration, std::unordered
 // same as GenerateConnections_Rings, but the addValue is in shuffled order
 bool GenerateConnections_RingsShuffle(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex, uint32 testIndex)
 {
-	newConnections.clear();
-
-	static std::vector<uint32> values;
-
-	const uint32 maxAddValue = uint32(std::ceil(float(numNodes) / 2.0f) - 1.0f);
-	uint32 addValue = iteration + 1;
-	const uint32 maxIterations = maxAddValue;
-	if (addValue > maxAddValue)
-	{
-		printf("More iterations requested than are physically possible! %u nodes can only do %u iterations / cycles.", numNodes, maxAddValue);
-		return false;
-	}
-
-	// Find out where FPE_Encrypt would give a 0 in this shuffle. That's the place we want to start the shuffle in
-	// since cycle 0 is where we add 1 to each node, and thus make a full cycle.
 	const uint32 c_key = testIndex ^ 0x1337beef;
-	uint32 shuffledIterationIndex = FPE_Decrypt(0, c_key, maxIterations, c_FPENumRounds);
+	const uint32 c_maxIterations = uint32(std::ceil(float(numNodes) / 2.0f) - 1.0f);
 
-	// get the actual add value of the cycle by shuffling the total number of add values using FPE
-	uint32 validCount = 0;
-	uint32 shuffledIteration = 0;
+	static uint32 shuffledIterationIndex = 0;
+
+	// always start with "cycle 1" to ensure a connected graph
+	if (iteration == 0)
+		shuffledIterationIndex = FPE_Decrypt(0, c_key, c_maxIterations, c_FPENumRounds);
+
+	// find the next valid cycle using FPE
+	uint32 shuffledIteration;
 	do
 	{
-		shuffledIteration = FPE_Encrypt(shuffledIterationIndex % maxIterations, c_key, maxIterations, c_FPENumRounds);
-		if (shuffledIteration < maxIterations)
-			validCount++;
+		shuffledIteration = FPE_Encrypt(shuffledIterationIndex, c_key, c_maxIterations, c_FPENumRounds);
 		shuffledIterationIndex++;
 	}
-	while (validCount <= iteration);
-	addValue = shuffledIteration + 1;
+	while(shuffledIteration >= c_maxIterations);
 
-	// TODO: wtf. i can only ever hit one or the other case below as i change the key and number of rounds
-
-	if (numNodes == 9 && iteration == 1 && shuffledIteration == 3)
-	{
-		int ijkl = 0;
-	}
-
-	if (numNodes == 9 && iteration == 1 && shuffledIteration == 2)
-	{
-		int ijkl = 0;
-	}
-
-	//printf("numNodes %u, testIndex %u, iteration %u: adding %u\n", numNodes, testIndex, iteration, addValue);
-
-	if (iteration == 0)
-	{
-		values.resize(numNodes);
-		for (uint32 i = 0; i < numNodes; ++i)
-			values[i] = i;
-	}
-
-	for (uint32 i = 0; i < numNodes; ++i)
-	{
-		uint32 nodeA = values[i];
-		uint32 nodeB = (nodeA + addValue) % numNodes;
-		values[i] = nodeB;
-
-		uint64 connection = NodesToConnectionIndex(nodeA, nodeB);
-
-		if (nodeA >= numNodes)
-		{
-			printf("invalid nodeA!\n");
-		}
-
-		if (nodeB >= numNodes)
-		{
-			printf("invalid nodeB!\n");
-		}
-
-		if (connectionsMade.count(connection) != 0)
-		{
-			printf("Duplicate connection!!\n");
-		}
-
-		connectionsMade.insert(connection);
-		newConnections.push_back(connection);
-	}
-
-	return true;
+	// generate a cycle
+	return GenerateConnections_Rings(numNodes, shuffledIteration, connectionsMade, rng, newConnections, internalIndex, testIndex);
 }
 
 // For the first iteration, makes a simple cycle of 0 -> 1 -> 2 -> ... -> (numNodes-1) -> 0
@@ -782,6 +712,7 @@ int main(int argc, char** argv)
 	DoGraphTests(10, 3, 100, "out/10");
 	DoGraphTests(60, 5, 100, "out/60");
 	DoGraphTests(100, 5, 100, "out/100");
+	DoGraphTests(101, 5, 100, "out/101");
 
 	return 0;
 }
