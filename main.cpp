@@ -330,6 +330,17 @@ uint32 CalculateRadius(uint32 numNodes, const std::unordered_set<uint64>& connec
 
 bool GenerateConnections_Rings(uint32 numNodes, uint32 iteration, std::unordered_set<uint64>& connectionsMade, std::mt19937& rng, std::vector<uint64>& newConnections, uint32& internalIndex, uint32 testIndex)
 {
+	/*
+	static uint32 lastTestIndex = ~uint32(0);
+
+	if (lastTestIndex != testIndex)
+	{
+		lastTestIndex = testIndex;
+		printf("test %u:\n", testIndex);
+	}
+	printf("  cycle %u\n", iteration);
+	*/
+
 	newConnections.clear();
 
 	const uint32 maxAddValue = uint32(std::ceil(float(numNodes) / 2.0f) - 1.0f);
@@ -386,7 +397,7 @@ bool GenerateConnections_RingsShuffle(uint32 numNodes, uint32 iteration, std::un
 	do
 	{
 		shuffledIteration = FPE_Encrypt(shuffledIterationIndex, c_key, c_maxIterations, c_FPENumRounds);
-		shuffledIterationIndex++;
+		shuffledIterationIndex = (shuffledIterationIndex + 1) % c_maxIterations;
 	}
 	while(shuffledIteration >= c_maxIterations);
 
